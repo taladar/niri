@@ -468,7 +468,7 @@ impl State {
                 if this.niri.exit_confirm_dialog.is_open() && pressed {
                     if raw == Some(Keysym::Return) {
                         info!("quitting after confirming exit dialog");
-                        this.niri.stop_signal.stop();
+                        this.niri.initiate_shutdown();
                     }
 
                     // Don't send this press to any clients.
@@ -663,7 +663,7 @@ impl State {
                 }
 
                 info!("quitting as requested");
-                self.niri.stop_signal.stop()
+                self.niri.initiate_shutdown()
             }
             Action::ChangeVt(vt) => {
                 self.backend.change_vt(vt);
