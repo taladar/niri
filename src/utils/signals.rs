@@ -50,7 +50,7 @@ mod platform {
                 Signals::new(&[Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP]).unwrap(),
                 |event, _, state| {
                     info!("quitting due to receiving signal {:?}", event.signal());
-                    state.niri.stop_signal.stop();
+                    state.niri.initiate_shutdown();
                 },
             )
             .unwrap();

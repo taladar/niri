@@ -211,6 +211,9 @@ pub struct Niri {
     /// Whether niri was run with `--session`
     pub is_session_instance: bool,
 
+    /// Whether shutdown has been initiated (to avoid triggering it multiple times).
+    pub shutdown_initiated: bool,
+
     /// Name of the Wayland socket.
     ///
     /// This is `None` when creating `Niri` without a Wayland socket.
@@ -2493,6 +2496,7 @@ impl Niri {
             socket_name,
             display_handle,
             is_session_instance,
+            shutdown_initiated: false,
             start_time: Instant::now(),
             is_at_startup: true,
             clock: animation_clock,
@@ -6456,6 +6460,108 @@ impl Niri {
         if let Some(output) = self.window_mru_ui.output().cloned() {
             self.queue_redraw(&output);
         }
+    }
+
+    pub fn initiate_shutdown(&mut self) {
+        if self.shutdown_initiated {
+            return;
+        }
+        self.shutdown_initiated = true;
+
+        #[cfg(feature = "systemd")]
+        if crate::utils::IS_SYSTEMD_SERVICE.load(std::sync::atomic::Ordering::Relaxed) {
+            let stop_signal = self.stop_signal.clone();
+            std::thread::spawn(move || {
+                // Start niri-shutdown.target without blocking. We cannot wait for it
+                // to complete because it has After=graphical-session-pre.target, and
+                // stopping graphical-session-pre.target requires niri.service to stop
+                // first (niri.service has After=graphical-session-pre.target, reversed
+                // for stop), which requires niri to exit — a circular dependency.
+                let rv = std::process::Command::new("systemctl")
+                    .args([
+                        "--user",
+                        "start",
+                        "--no-block",
+                        "--job-mode=replace-irreversibly",
+                        "niri-shutdown.target",
+                    ])
+                    .status();
+                match rv {
+                    Ok(s) if s.success() => {}
+                    Ok(s) => {
+                        warn!("error starting niri-shutdown.target: systemctl exited with {s}");
+                    }
+                    Err(err) => {
+                        warn!("error starting niri-shutdown.target: {err:?}");
+                    }
+                }
+
+                // Poll for graphical-session.target to become inactive. Because
+                // niri.service has Before=graphical-session.target, stopping
+                // graphical-session.target does NOT require niri.service to stop first
+                // (the reversed Before= ordering means graphical-session.target stops
+                // before niri.service). So we can wait here while the event loop keeps
+                // running and Wayland clients can still communicate with niri as they
+                // shut down. All PartOf=graphical-session.target services that also
+                // have After=graphical-session.target will have stopped before
+                // graphical-session.target becomes inactive.
+                let log_pending_jobs = || {
+                    match std::process::Command::new("systemctl")
+                        .args(["--user", "list-jobs"])
+                        .output()
+                    {
+                        Ok(output) => {
+                            let stdout = String::from_utf8_lossy(&output.stdout);
+                            info!("pending systemd user jobs:\n{stdout}");
+                        }
+                        Err(err) => {
+                            warn!("error listing pending systemd user jobs: {err:?}");
+                        }
+                    }
+                };
+
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(30);
+                let mut next_log = std::time::Instant::now()
+                    + std::time::Duration::from_secs(5);
+                loop {
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
+                        warn!(
+                            "timed out waiting for graphical-session.target to stop, \
+                             proceeding with shutdown"
+                        );
+                        log_pending_jobs();
+                        break;
+                    }
+                    if now >= next_log {
+                        log_pending_jobs();
+                        next_log = now + std::time::Duration::from_secs(5);
+                    }
+                    match std::process::Command::new("systemctl")
+                        .args(["--user", "is-active", "graphical-session.target"])
+                        .status()
+                    {
+                        Ok(s) if !s.success() => {
+                            debug!("graphical-session.target is no longer active");
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            warn!(
+                                "error checking graphical-session.target status: {err:?}"
+                            );
+                            break;
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                stop_signal.stop();
+            });
+            return;
+        }
+
+        self.stop_signal.stop();
     }
 }
 
