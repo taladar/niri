@@ -1726,7 +1726,13 @@ impl FromStr for WorkspaceReferenceArg {
     type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let reference = if let Ok(index) = s.parse::<i32>() {
+        let reference = if let Some(id_str) = s.strip_prefix("id:") {
+            if let Ok(id) = id_str.parse::<u64>() {
+                Self::Id(id)
+            } else {
+                return Err("workspace id after 'id:' must be a valid u64");
+            }
+        } else if let Ok(index) = s.parse::<i32>() {
             if let Ok(idx) = u8::try_from(index) {
                 Self::Index(idx)
             } else {
