@@ -3650,13 +3650,27 @@ impl Niri {
 
     pub fn lock_surface_focus(&self) -> Option<WlSurface> {
         let output_under_cursor = self.output_under_cursor();
-        let output = output_under_cursor
+        let preferred = output_under_cursor
             .as_ref()
             .or_else(|| self.layout.active_output())
-            .or_else(|| self.global_space.outputs().next())?;
+            .or_else(|| self.global_space.outputs().next());
 
-        let state = self.output_state.get(output)?;
-        state.lock_surface.as_ref().map(|s| s.wl_surface()).cloned()
+        // Prefer the lock surface on the output the user is looking at. But if that output has no
+        // lock surface yet (e.g. it just woke from DPMS / was hotplugged and its client hasn't
+        // created the lock surface yet), fall back to ANY output that already has one. Otherwise
+        // keyboard focus drops to None and every keystroke is silently discarded until the new
+        // output's lock surface arrives.
+        if let Some(surface) = preferred
+            .and_then(|output| self.output_state.get(output))
+            .and_then(|state| state.lock_surface.as_ref())
+        {
+            return Some(surface.wl_surface().clone());
+        }
+
+        self.output_state
+            .values()
+            .find_map(|state| state.lock_surface.as_ref())
+            .map(|s| s.wl_surface().clone())
     }
 
     /// Schedules an immediate redraw on all outputs if one is not already scheduled.
