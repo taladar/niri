@@ -5680,6 +5680,9 @@ impl Niri {
             })
             .flatten();
 
+        #[cfg(feature = "dbus")]
+        let disable_notification = self.config.borrow().disable_screenshot_notification;
+
         // Prepare to set the encoded image as our clipboard selection. This must be done from the
         // main thread.
         let (tx, rx) = calloop::channel::sync_channel::<Arc<[u8]>>(1);
@@ -5750,8 +5753,11 @@ impl Niri {
             }
 
             #[cfg(feature = "dbus")]
-            if let Err(err) = crate::utils::show_screenshot_notification(image_path.as_deref()) {
-                warn!("error showing screenshot notification: {err:?}");
+            if !disable_notification {
+                if let Err(err) = crate::utils::show_screenshot_notification(image_path.as_deref())
+                {
+                    warn!("error showing screenshot notification: {err:?}");
+                }
             }
 
             // Send screenshot completion event.

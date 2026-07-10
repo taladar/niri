@@ -135,6 +135,18 @@ You can also set this option to `null` to disable saving screenshots to disk.
 screenshot-path null
 ```
 
+### `disable-screenshot-notification`
+
+By default, after taking a screenshot, niri shows a desktop notification (via the
+`org.freedesktop.Notifications` D-Bus interface) letting you know that the screenshot
+was captured and can be pasted from the clipboard.
+
+Set this flag to disable that notification.
+
+```kdl
+disable-screenshot-notification
+```
+
 ### `environment`
 
 Override environment variables for processes spawned by niri.
