@@ -2418,14 +2418,36 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     pub fn tiles_with_ipc_layouts(&self) -> impl Iterator<Item = (&Tile<W>, WindowLayout)> {
+        // Precompute the on-screen tiles and their positions so that we can report
+        // tile_pos_in_workspace_view for tiled windows, the same way the floating layout does. A
+        // tiled window is only actually visible when it is not hidden behind a tab (the `visible`
+        // flag) and it overlaps the workspace view horizontally (it may be scrolled off to either
+        // side). We reuse tiles_with_render_positions() as the source of truth for positions and
+        // visibility, and match tiles by pointer identity since W::Id is not hashable.
+        let view_w = self.view_size.w;
+        let visible_positions: Vec<(*const Tile<W>, Point<f64, Logical>)> = self
+            .tiles_with_render_positions()
+            .filter(|(tile, pos, visible)| {
+                *visible && pos.x + tile.tile_size().w > 0. && pos.x < view_w
+            })
+            .map(|(tile, pos, _)| (tile as *const Tile<W>, pos))
+            .collect();
+
         self.columns
             .iter()
             .enumerate()
             .flat_map(move |(col_idx, col)| {
+                let visible_positions = visible_positions.clone();
                 col.tiles().enumerate().map(move |(tile_idx, (tile, _))| {
+                    let tile_ptr = tile as *const Tile<W>;
+                    let tile_pos_in_workspace_view = visible_positions
+                        .iter()
+                        .find(|(ptr, _)| *ptr == tile_ptr)
+                        .map(|(_, pos)| (*pos).into());
                     let layout = WindowLayout {
                         // Our indices are 1-based, consistent with the actions.
                         pos_in_scrolling_layout: Some((col_idx + 1, tile_idx + 1)),
+                        tile_pos_in_workspace_view,
                         ..tile.ipc_layout_template()
                     };
                     (tile, layout)
