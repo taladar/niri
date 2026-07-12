@@ -6465,6 +6465,13 @@ impl Niri {
         let _span = tracy_client::span!("Niri::notify_activity");
 
         self.idle_notifier_state.notify_activity(&self.seat);
+        // The injector seat is a client-visible wl_seat (so injection can reach
+        // clients), but real input never flows to it. Some idle daemons bind
+        // their ext-idle-notification to the last-advertised seat, which is the
+        // injector; without this, real user activity would never reset their
+        // idle timer and they would fire spuriously (e.g. locking the screen
+        // seconds after the user actually typed).
+        self.idle_notifier_state.notify_activity(&self.injector_seat);
 
         self.notified_activity_this_iteration = true;
     }
