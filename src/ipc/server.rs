@@ -27,7 +27,7 @@ use smithay::input::pointer::{
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
 use smithay::reexports::rustix::fs::unlink;
-use smithay::utils::SERIAL_COUNTER;
+use smithay::utils::{Logical, Point, Rectangle, Size, SERIAL_COUNTER};
 use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer};
 
 use crate::backend::IpcOutputMap;
@@ -515,6 +515,7 @@ async fn handle_event_stream_client(client: EventStreamClient) -> anyhow::Result
 fn make_ipc_window(
     mapped: &Mapped,
     workspace_id: Option<WorkspaceId>,
+    is_visible: bool,
     layout: WindowLayout,
 ) -> niri_ipc::Window {
     with_toplevel_role(mapped.toplevel(), |role| niri_ipc::Window {
@@ -526,9 +527,77 @@ fn make_ipc_window(
         is_focused: mapped.is_focused(),
         is_floating: mapped.is_floating(),
         is_urgent: mapped.is_urgent(),
+        is_visible,
         layout,
         focus_timestamp: mapped.get_focus_timestamp().map(Timestamp::from),
     })
+}
+
+/// Returns whether `target` is entirely covered by the union of `occluders`.
+///
+/// All rectangles are in the same coordinate space and treated as opaque. Implemented by
+/// subtracting each occluder from the still-uncovered sub-rectangles of `target`; with the small
+/// number of windows and layer surfaces on a workspace this is inexpensive.
+fn rect_fully_covered(
+    target: Rectangle<f64, Logical>,
+    occluders: &[Rectangle<f64, Logical>],
+) -> bool {
+    // A zero-area target has nothing to cover (and nothing visible either).
+    if target.size.w <= 0. || target.size.h <= 0. {
+        return true;
+    }
+
+    // Sub-rectangles of `target` not yet covered by any processed occluder.
+    let mut remaining = vec![target];
+
+    for occ in occluders {
+        if remaining.is_empty() {
+            return true;
+        }
+
+        let mut next = Vec::new();
+        for r in remaining {
+            let Some(cov) = r.intersection(*occ) else {
+                // This occluder doesn't touch r at all.
+                next.push(r);
+                continue;
+            };
+
+            let r_right = r.loc.x + r.size.w;
+            let r_bottom = r.loc.y + r.size.h;
+            let cov_right = cov.loc.x + cov.size.w;
+            let cov_bottom = cov.loc.y + cov.size.h;
+
+            let mid_left = cov.loc.x.max(r.loc.x);
+            let mid_right = cov_right.min(r_right);
+
+            // Left, right, middle-top and middle-bottom slices of r around cov.
+            push_uncovered_rect(&mut next, r.loc.x, r.loc.y, cov.loc.x, r_bottom);
+            push_uncovered_rect(&mut next, cov_right, r.loc.y, r_right, r_bottom);
+            push_uncovered_rect(&mut next, mid_left, r.loc.y, mid_right, cov.loc.y);
+            push_uncovered_rect(&mut next, mid_left, cov_bottom, mid_right, r_bottom);
+        }
+        remaining = next;
+    }
+
+    remaining.is_empty()
+}
+
+/// Pushes the rectangle spanning (`left`,`top`)-(`right`,`bottom`) onto `out`, skipping empty rects
+/// and sub-pixel slivers so floating-point noise doesn't mark a window visible through a hairline.
+fn push_uncovered_rect(
+    out: &mut Vec<Rectangle<f64, Logical>>,
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+) {
+    const EPS: f64 = 0.5;
+    let w = right - left;
+    let h = bottom - top;
+    if w > EPS && h > EPS {
+        out.push(Rectangle::new(Point::from((left, top)), Size::from((w, h))));
+    }
 }
 
 impl State {
@@ -685,10 +754,63 @@ impl State {
         }
     }
 
+    /// Computes the set of window ids that are currently visible on screen.
+    ///
+    /// See [`niri_ipc::Window::is_visible`]. A window is visible when it is a candidate on some
+    /// displayed output (on the active workspace and within the workspace view) and not fully
+    /// covered by the windows stacked above it or by that output's `top`/`overlay` layer surfaces.
+    fn ipc_visible_window_ids(&self) -> HashSet<u64> {
+        let (per_output, moving) = self.niri.layout.ipc_visible_candidates();
+
+        let mut visible = HashSet::new();
+
+        // A window being interactively dragged is always visible on top of everything.
+        if let Some(window) = moving {
+            visible.insert(window.id().get());
+        }
+
+        for (output, view_size, windows) in &per_output {
+            let output_rect = Rectangle::from_size(*view_size);
+
+            // Top/overlay layer-shell surfaces are drawn above all windows; collect them as
+            // occluders. (Background/bottom layers are below windows and don't hide them.)
+            let mut layer_rects = Vec::new();
+            let map = layer_map_for_output(output);
+            for layer in map.layers() {
+                if !matches!(layer.layer(), Layer::Top | Layer::Overlay) {
+                    continue;
+                }
+                if let Some(geo) = map.layer_geometry(layer) {
+                    layer_rects.push(geo.to_f64());
+                }
+            }
+
+            // `windows` is ordered top to bottom, so the occluders of windows[i] are all the layer
+            // surfaces plus windows[0..i].
+            for (i, (window, rect)) in windows.iter().enumerate() {
+                let Some(visible_rect) = rect.intersection(output_rect) else {
+                    // Entirely outside the output.
+                    continue;
+                };
+
+                let mut occluders = layer_rects.clone();
+                occluders.extend(windows[..i].iter().map(|(_, r)| *r));
+
+                if !rect_fully_covered(visible_rect, &occluders) {
+                    visible.insert(window.id().get());
+                }
+            }
+        }
+
+        visible
+    }
+
     fn ipc_refresh_windows(&mut self) {
         let Some(server) = &self.niri.ipc_server else {
             return;
         };
+
+        let visible_ids = self.ipc_visible_window_ids();
 
         let _span = tracy_client::span!("State::ipc_refresh_windows");
 
@@ -711,22 +833,25 @@ impl State {
                 focused_id = Some(id);
             }
 
+            let is_visible = visible_ids.contains(&id);
+
             let Some(ipc_win) = state.windows.get(&id) else {
-                let window = make_ipc_window(mapped, ws_id, window_layout);
+                let window = make_ipc_window(mapped, ws_id, is_visible, window_layout);
                 events.push(Event::WindowOpenedOrChanged { window });
                 return;
             };
 
             let workspace_id = ws_id.map(|id| id.get());
-            let mut changed =
-                ipc_win.workspace_id != workspace_id || ipc_win.is_floating != mapped.is_floating();
+            let mut changed = ipc_win.workspace_id != workspace_id
+                || ipc_win.is_floating != mapped.is_floating()
+                || ipc_win.is_visible != is_visible;
 
             changed |= with_toplevel_role(mapped.toplevel(), |role| {
                 ipc_win.title != role.title || ipc_win.app_id != role.app_id
             });
 
             if changed {
-                let window = make_ipc_window(mapped, ws_id, window_layout);
+                let window = make_ipc_window(mapped, ws_id, is_visible, window_layout);
                 events.push(Event::WindowOpenedOrChanged { window });
                 return;
             }

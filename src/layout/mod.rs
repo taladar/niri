@@ -1695,6 +1695,63 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Returns the windows that can currently be visible on each output, as raw material for
+    /// computing per-window visibility for IPC.
+    ///
+    /// For every output that is displaying content, this yields the windows on its active
+    /// workspace that lie within the workspace view (scrolled on-screen and not hidden behind a
+    /// tab), ordered top to bottom (topmost first) together with their rectangles in output-local
+    /// logical coordinates. Only these windows can be visible; everything else (inactive
+    /// workspaces, off-screen columns) is not. The caller is expected to combine this with the
+    /// per-output `top`/`overlay` layer-shell surfaces, which the layout does not track, to decide
+    /// final occlusion.
+    ///
+    /// The second return value is the interactively-moved window, if any; it is always considered
+    /// visible since it is being dragged on top of everything.
+    #[allow(clippy::type_complexity)]
+    pub fn ipc_visible_candidates(
+        &self,
+    ) -> (
+        Vec<(Output, Size<f64, Logical>, Vec<(&W, Rectangle<f64, Logical>)>)>,
+        Option<&W>,
+    ) {
+        let mut result = Vec::new();
+
+        if let MonitorSet::Normal { monitors, .. } = &self.monitor_set {
+            for mon in monitors {
+                let view_size = mon.view_size();
+                let view_w = view_size.w;
+                let ws = mon.active_workspace_ref();
+
+                let mut windows = Vec::new();
+                // tiles_with_render_positions() yields floating (topmost first) then scrolling, i.e.
+                // top to bottom, and marks tab-hidden / fullscreen-hidden tiles as not visible.
+                for (tile, pos, visible) in ws.tiles_with_render_positions() {
+                    if !visible {
+                        continue;
+                    }
+                    let size = tile.tile_size();
+                    // Skip tiles scrolled off the side of the workspace view, consistent with
+                    // WindowLayout::tile_pos_in_workspace_view.
+                    if pos.x + size.w <= 0. || pos.x >= view_w {
+                        continue;
+                    }
+                    windows.push((tile.window(), Rectangle::new(pos, size)));
+                }
+
+                result.push((mon.output.clone(), view_size, windows));
+            }
+        }
+
+        let moving = self
+            .interactive_move
+            .as_ref()
+            .and_then(|state| state.moving())
+            .map(|move_| move_.tile.window());
+
+        (result, moving)
+    }
+
     pub fn with_windows_mut(&mut self, mut f: impl FnMut(&mut W, Option<&Output>)) {
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             f(move_.tile.window_mut(), Some(&move_.output));

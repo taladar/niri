@@ -1349,6 +1349,22 @@ pub struct Window {
     pub is_floating: bool,
     /// Whether this window requests your attention.
     pub is_urgent: bool,
+    /// Whether any part of this window is currently visible on screen.
+    ///
+    /// This is `true` when the window is on the active workspace of its output, scrolled into the
+    /// workspace view (not off to the side and not hidden behind a tab), and not fully covered by
+    /// other windows stacked above it or by `top`/`overlay` layer-shell surfaces. A fullscreen
+    /// window hides everything else on its output, and a window on an inactive workspace or output
+    /// that isn't currently displayed is not visible.
+    ///
+    /// Windows are treated as opaque rectangles for this computation, so a fully-covering but
+    /// visually translucent window above still counts as hiding the one below.
+    ///
+    /// Defaults to `false` when absent so that a newer CLI can still parse the responses of an
+    /// older compositor that predates this field (e.g. before a session restart following an
+    /// update).
+    #[serde(default)]
+    pub is_visible: bool,
     /// Position- and size-related properties of the window.
     pub layout: WindowLayout,
     /// Timestamp when the window was most recently focused.
