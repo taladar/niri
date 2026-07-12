@@ -324,6 +324,31 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(long))]
         id: u64,
     },
+    /// Send an ordered mix of typed text and key combinations to a window
+    /// without giving it keyboard focus.
+    ///
+    /// Input is delivered through a dedicated virtual seat, so the currently
+    /// focused window keeps its keyboard focus and is not disturbed. Text is
+    /// typed via a temporary generated keymap, so the result is independent of
+    /// the active keyboard layout.
+    ///
+    /// Each segment is either `text:<literal text>` or `key:<combo>`. A combo is
+    /// an xkb-style key combination, e.g. `Return`, `Escape`, `ctrl+r`,
+    /// `ctrl+shift+k`; recognized modifier names are `ctrl`/`control`, `shift`,
+    /// `alt`/`mod1`, `super`/`logo`/`mod4`, `altgr`/`mod5`. Segments are applied
+    /// in the given order within a single focus cycle, so text and keys can be
+    /// interleaved, e.g.:
+    ///
+    ///   send-into-window --id 42 text:"first line" key:shift+Return \
+    ///                            text:"second line" key:Return
+    SendIntoWindow {
+        /// Id of the window to send input to.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
+        /// Ordered input segments, each `text:<text>` or `key:<combo>`.
+        #[cfg_attr(feature = "clap", arg(value_name = "SEGMENT"))]
+        segments: Vec<String>,
+    },
     /// Focus a window in the focused column by index.
     FocusWindowInColumn {
         /// Index of the window in the column.

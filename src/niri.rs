@@ -325,6 +325,9 @@ pub struct Niri {
     pub single_pixel_buffer_state: SinglePixelBufferState,
 
     pub seat: Seat<State>,
+    /// Headless seat used only to inject synthetic keyboard input into specific
+    /// windows without disturbing the real seat's keyboard focus.
+    pub injector_seat: Seat<State>,
     /// Scancodes of the keys to suppress.
     pub suppressed_keys: HashSet<Keycode>,
     /// Button codes of the mouse buttons to suppress.
@@ -2400,6 +2403,29 @@ impl Niri {
         }
         seat.add_pointer();
 
+        // A second, keyboard-only seat used exclusively for injecting synthetic
+        // keyboard input into specific windows (see State::type_into_window and
+        // State::key_into_window). Because Wayland keyboard focus is per-seat,
+        // pointing this seat's focus at a target window delivers keys to it
+        // while leaving the real seat's focus (the window the user is actually
+        // typing in) completely untouched.
+        let mut injector_seat: Seat<State> =
+            seat_state.new_wl_seat(&display_handle, "niri-injector");
+        if let Err(err) = injector_seat.add_keyboard(
+            config_.input.keyboard.xkb.to_xkb_config(),
+            config_.input.keyboard.repeat_delay.into(),
+            config_.input.keyboard.repeat_rate.into(),
+        ) {
+            warn!("error adding injector keyboard: {err:?}");
+            injector_seat
+                .add_keyboard(
+                    Default::default(),
+                    config_.input.keyboard.repeat_delay.into(),
+                    config_.input.keyboard.repeat_rate.into(),
+                )
+                .unwrap();
+        }
+
         let cursor_shape_manager_state = CursorShapeManagerState::new::<State>(&display_handle);
         let cursor_manager =
             CursorManager::new(&config_.cursor.xcursor_theme, config_.cursor.xcursor_size);
@@ -2567,6 +2593,7 @@ impl Niri {
             single_pixel_buffer_state,
 
             seat,
+            injector_seat,
             keyboard_focus: KeyboardFocus::Layout { surface: None },
             layer_shell_on_demand_focus: None,
             idle_inhibiting_surfaces: HashSet::new(),

@@ -56,6 +56,7 @@ use crate::utils::spawning::{spawn, spawn_sh};
 use crate::utils::{center, get_monotonic_time, CastSessionId, ResizeEdge};
 
 pub mod backend_ext;
+pub mod inject;
 pub mod move_grab;
 pub mod pick_color_grab;
 pub mod pick_window_grab;
@@ -849,6 +850,9 @@ impl State {
                 if let Some(window) = window {
                     self.focus_window(&window);
                 }
+            }
+            Action::SendIntoWindow(id, segments) => {
+                self.send_into_window(id, &segments);
             }
             Action::FocusWindowInColumn(index) => {
                 self.niri.layout.focus_window_in_column(index);
