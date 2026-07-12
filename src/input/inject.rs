@@ -8,13 +8,16 @@
 //! then drop its focus again. The real seat is never touched, so the window the
 //! user is actually typing in keeps its focus and selection.
 //!
-//! For robustness across keyboard layouts, each injection uploads a freshly
-//! generated xkb keymap to the injector seat in which every keysym we need lives
-//! on its own keycode. This is the same trick `wtype` uses: it makes the emitted
-//! characters independent of whatever layout (US, German, ...) is currently
-//! active on the real seat.
+//! Rather than uploading a synthetic keymap to the injector seat (which smithay
+//! would broadcast to *every* client bound to that seat, corrupting the keyboard
+//! state of unrelated windows and racing with the user's own typing), we look up
+//! each keysym in the injector seat's *current* keymap and send the matching
+//! keycodes and modifiers. The keymap is never changed, so no other client is
+//! disturbed. The trade-off is that a keysym which the active keymap cannot
+//! produce (e.g. a character not present in any of the configured layouts) is
+//! skipped rather than typed.
 
-use std::fmt::Write as _;
+use std::collections::HashMap;
 
 use smithay::backend::input::KeyState;
 use smithay::input::keyboard::{xkb, FilterResult, Keysym};
@@ -22,12 +25,6 @@ use smithay::utils::SERIAL_COUNTER;
 
 use crate::niri::State;
 use crate::utils::get_monotonic_time;
-
-/// xkb reserves keycodes 0-7; usable keycodes start at 8. We map our synthetic
-/// keysyms onto keycodes starting at 9 (leaving 8 unused), up to the xkb maximum
-/// of 255.
-const FIRST_KEYCODE: u32 = 9;
-const MAX_KEYCODE: u32 = 255;
 
 impl State {
     /// Send an ordered mix of typed text and key combinations to the window with
@@ -100,57 +97,33 @@ impl State {
             return;
         };
 
-        // Assign a keycode to each distinct keysym across all chords.
-        let mut order: Vec<Keysym> = Vec::new();
-        for chord in chords {
-            for keysym in chord {
-                if !order.iter().any(|k| k.raw() == keysym.raw()) {
-                    order.push(*keysym);
-                }
-            }
-        }
-
-        let capacity = (MAX_KEYCODE - FIRST_KEYCODE + 1) as usize;
-        if order.len() > capacity {
-            warn!(
-                "too many distinct keys to inject ({}), truncating to {capacity}",
-                order.len()
-            );
-            order.truncate(capacity);
-        }
-
-        let keycode_of = |keysym: &Keysym| -> Option<u32> {
-            order
-                .iter()
-                .position(|k| k.raw() == keysym.raw())
-                .map(|i| FIRST_KEYCODE + i as u32)
-        };
-
-        let keymap = build_keymap(&order);
-
         let keyboard = self
             .niri
             .injector_seat
             .get_keyboard()
             .expect("injector seat always has a keyboard");
 
-        if let Err(err) = keyboard.set_keymap_from_string(self, keymap) {
-            warn!("failed to set injector keymap: {err:?}");
+        // Translate the requested keysyms into (keycode, state) events against the injector's
+        // current keymap, without modifying it. `plan` holds one event list per chord.
+        let plan: Vec<Vec<(u32, KeyState)>> = keyboard.with_xkb_state(self, |ctx| {
+            let guard = ctx.xkb().lock().unwrap();
+            // SAFETY: `keymap`/`state` are only used within this closure and are not retained.
+            let keymap = unsafe { guard.keymap() };
+            let layout = unsafe { guard.state() }.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE);
+            build_plan(keymap, layout, chords)
+        });
+
+        if plan.is_empty() {
             return;
         }
 
-        // Focus the target on the injector seat only; this sends it wl_keyboard
-        // enter (with the generated keymap) without touching the real seat.
+        // Focus the target on the injector seat only; this sends it wl_keyboard enter without
+        // touching the real seat.
         keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
 
-        for chord in chords {
-            let codes: Vec<u32> = chord.iter().filter_map(&keycode_of).collect();
-
-            for code in codes.iter() {
-                self.injector_key(*code, KeyState::Pressed);
-            }
-            for code in codes.iter().rev() {
-                self.injector_key(*code, KeyState::Released);
+        for chord in &plan {
+            for (code, state) in chord {
+                self.injector_key(*code, *state);
             }
         }
 
@@ -178,37 +151,126 @@ impl State {
     }
 }
 
-/// Build an xkb keymap string that maps each keysym in `keysyms` to its own
-/// keycode (starting at [`FIRST_KEYCODE`]), with no modifiers required to
-/// produce it. Modifier keysyms (Control_L, Shift_L, ...) still act as modifiers
-/// because the included `complete` compat rules interpret them.
-fn build_keymap(keysyms: &[Keysym]) -> String {
-    let mut keycodes = String::new();
-    let mut symbols = String::new();
+/// Turn each chord of keysyms into an ordered list of (keycode, press/release)
+/// events that reproduce those keysyms under `keymap` in the given `layout`.
+///
+/// A chord whose keysyms cannot all be produced by the current keymap is skipped
+/// (with a warning) rather than aborting the whole injection.
+fn build_plan(keymap: &xkb::Keymap, layout: u32, chords: &[Vec<Keysym>]) -> Vec<Vec<(u32, KeyState)>> {
+    let mod_keycodes = modifier_keycodes(keymap);
 
-    for (i, keysym) in keysyms.iter().enumerate() {
-        let code = FIRST_KEYCODE + i as u32;
-        // keysym_get_name returns a token the xkb parser accepts as input (e.g.
-        // "a", "Return", "at", "U00E4"), i.e. it round-trips.
-        let name = xkb::keysym_get_name(*keysym);
-        let _ = writeln!(keycodes, "        <I{i}> = {code};");
-        let _ = writeln!(symbols, "        key <I{i}> {{ [ {name} ] }};");
+    let mut plan = Vec::new();
+    'chords: for chord in chords {
+        // Resolve every keysym to a base keycode plus the modifiers needed to reach its level.
+        let mut resolved: Vec<(u32, xkb::ModMask)> = Vec::new();
+        for keysym in chord {
+            let Some(entry) = resolve_keysym(keymap, layout, *keysym) else {
+                warn!(
+                    "skipping chord: keysym {:?} is not typable in the current keymap",
+                    xkb::keysym_get_name(*keysym)
+                );
+                continue 'chords;
+            };
+            resolved.push(entry);
+        }
+
+        // Collect the modifier keycodes required across the whole chord.
+        let mut mod_codes: Vec<u32> = Vec::new();
+        for (_, mask) in &resolved {
+            for bit in 0..u32::BITS {
+                if mask & (1 << bit) == 0 {
+                    continue;
+                }
+                let Some(&code) = mod_keycodes.get(&bit) else {
+                    warn!("skipping chord: no key produces a required modifier (bit {bit})");
+                    continue 'chords;
+                };
+                if !mod_codes.contains(&code) {
+                    mod_codes.push(code);
+                }
+            }
+        }
+
+        // Press modifiers, then keys; release keys, then modifiers (each in reverse).
+        let mut events = Vec::new();
+        for code in &mod_codes {
+            events.push((*code, KeyState::Pressed));
+        }
+        for (code, _) in &resolved {
+            events.push((*code, KeyState::Pressed));
+        }
+        for (code, _) in resolved.iter().rev() {
+            events.push((*code, KeyState::Released));
+        }
+        for code in mod_codes.iter().rev() {
+            events.push((*code, KeyState::Released));
+        }
+        plan.push(events);
     }
 
-    format!(
-        "xkb_keymap {{\n\
-         xkb_keycodes \"(injected)\" {{\n\
-         \x20   minimum = 8;\n\
-         \x20   maximum = {MAX_KEYCODE};\n\
-         {keycodes}\
-         }};\n\
-         xkb_types \"(injected)\" {{ include \"complete\" }};\n\
-         xkb_compat \"(injected)\" {{ include \"complete\" }};\n\
-         xkb_symbols \"(injected)\" {{\n\
-         {symbols}\
-         }};\n\
-         }};\n"
-    )
+    plan
+}
+
+/// Find a keycode in `layout` that produces `keysym`, together with the modifier
+/// mask needed to reach the level it sits on (the mask with the fewest modifiers
+/// is preferred).
+fn resolve_keysym(keymap: &xkb::Keymap, layout: u32, keysym: Keysym) -> Option<(u32, xkb::ModMask)> {
+    let min = keymap.min_keycode().raw();
+    let max = keymap.max_keycode().raw();
+
+    for raw in min..=max {
+        let keycode = xkb::Keycode::new(raw);
+        let num_levels = keymap.num_levels_for_key(keycode, layout);
+        for level in 0..num_levels {
+            let syms = keymap.key_get_syms_by_level(keycode, layout, level);
+            if syms.len() != 1 || syms[0].raw() != keysym.raw() {
+                continue;
+            }
+
+            let mut masks = [xkb::ModMask::default(); 16];
+            let num_masks = keymap.key_get_mods_for_level(keycode, layout, level, &mut masks);
+            let mask = masks[..num_masks]
+                .iter()
+                .copied()
+                .min_by_key(|m| m.count_ones())
+                .unwrap_or(0);
+            return Some((raw, mask));
+        }
+    }
+
+    None
+}
+
+/// Build a map from real-modifier bit index to a keycode that activates it, by
+/// probing every key against a scratch xkb state. The Lock (Caps Lock) modifier
+/// is skipped so injection never toggles it.
+fn modifier_keycodes(keymap: &xkb::Keymap) -> HashMap<u32, u32> {
+    let min = keymap.min_keycode().raw();
+    let max = keymap.max_keycode().raw();
+
+    let lock_bit = (0..keymap.num_mods())
+        .find(|&idx| keymap.mod_get_name(idx).eq_ignore_ascii_case("lock"));
+
+    let mut map = HashMap::new();
+    let mut state = xkb::State::new(keymap);
+    for raw in min..=max {
+        let keycode = xkb::Keycode::new(raw);
+        state.update_key(keycode, xkb::KeyDirection::Down);
+        let mask = state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
+        state.update_key(keycode, xkb::KeyDirection::Up);
+
+        // Only take keys that toggle exactly one modifier, so we know what pressing them does.
+        if mask.count_ones() != 1 {
+            continue;
+        }
+        let bit = mask.trailing_zeros();
+        if Some(bit) == lock_bit {
+            continue;
+        }
+        map.entry(bit).or_insert(raw);
+    }
+
+    map
 }
 
 /// Parse an xkb-style key combination such as `ctrl+shift+r` or `Return` into
