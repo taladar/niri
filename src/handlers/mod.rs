@@ -119,6 +119,14 @@ impl SeatHandler for State {
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        // The injector seat exists only to deliver synthetic keyboard input into unfocused
+        // windows. It must never take part in clipboard/primary-selection handling: pointing its
+        // focus at a surface during injection would otherwise send that client the injector seat's
+        // (empty) selection and clobber the real seat's clipboard for single-selection clients.
+        if *seat == self.niri.injector_seat {
+            return;
+        }
+
         let dh = &self.niri.display_handle;
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client.clone());
