@@ -801,13 +801,15 @@ impl XdgActivationHandler for State {
         }
 
         // Check the serial against both a keyboard and a pointer, since layer-shell surfaces
-        // with no keyboard interactivity won't have any keyboard focus.
-        let kb_last_enter = seat.get_keyboard().unwrap().last_enter();
+        // with no keyboard interactivity won't have any keyboard focus. Either capability may be
+        // absent: e.g. the keyboard-only injector seat has no pointer, so use non-panicking
+        // accessors here.
+        let kb_last_enter = seat.get_keyboard().and_then(|kb| kb.last_enter());
         if kb_last_enter.is_some_and(|last_enter| serial.is_no_older_than(&last_enter)) {
             return true;
         }
 
-        let pointer_last_enter = seat.get_pointer().unwrap().last_enter();
+        let pointer_last_enter = seat.get_pointer().and_then(|ptr| ptr.last_enter());
         if pointer_last_enter.is_some_and(|last_enter| serial.is_no_older_than(&last_enter)) {
             return true;
         }
