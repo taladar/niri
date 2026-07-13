@@ -850,6 +850,17 @@ impl State {
                 ipc_win.title != role.title || ipc_win.app_id != role.app_id
             });
 
+            // Emit the dedicated WindowUrgencyChanged on every urgency transition, even
+            // when we also emit a full WindowOpenedOrChanged below. Since is_visible was
+            // added to `changed`, a focus-driven urgency clear (which flips is_visible)
+            // would otherwise take the early return and never emit WindowUrgencyChanged,
+            // leaving consumers that only watch that event (the urgency indicator) stuck
+            // until their next safety recompute.
+            let urgent = mapped.is_urgent();
+            if urgent != ipc_win.is_urgent {
+                events.push(Event::WindowUrgencyChanged { id, urgent })
+            }
+
             if changed {
                 let window = make_ipc_window(mapped, ws_id, is_visible, window_layout);
                 events.push(Event::WindowOpenedOrChanged { window });
@@ -870,11 +881,6 @@ impl State {
                     id,
                     focus_timestamp,
                 });
-            }
-
-            let urgent = mapped.is_urgent();
-            if urgent != ipc_win.is_urgent {
-                events.push(Event::WindowUrgencyChanged { id, urgent })
             }
         });
 
