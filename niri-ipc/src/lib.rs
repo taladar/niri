@@ -349,6 +349,53 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(value_name = "SEGMENT"))]
         segments: Vec<String>,
     },
+    /// Show a window on its output without giving it keyboard focus.
+    ///
+    /// Makes the window's workspace the active one on its output and scrolls
+    /// the window into view, but does not move keyboard focus, so the window
+    /// you are currently working in keeps its focus. Fails if the window is on
+    /// the same output as the currently focused window (showing it there would
+    /// move focus and could scroll the focused window off screen).
+    ShowWindow {
+        /// Id of the window to show.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
+    },
+    /// Show a workspace on its output without giving it keyboard focus.
+    ///
+    /// Makes the workspace the displayed one on its output without moving
+    /// keyboard focus. Fails if the workspace is on the same output as the
+    /// currently focused window (use `id:`/name references, not a bare index,
+    /// to target a workspace on another output).
+    ShowWorkspace {
+        /// Reference (index or name) of the workspace to show.
+        #[cfg_attr(feature = "clap", arg())]
+        reference: WorkspaceReferenceArg,
+    },
+    /// Scroll a non-focused output's view one column to the left, without focus.
+    ShowColumnLeft {
+        /// Output to act on; defaults to the only non-focused output.
+        #[cfg_attr(feature = "clap", arg(long))]
+        output: Option<String>,
+    },
+    /// Scroll a non-focused output's view one column to the right, without focus.
+    ShowColumnRight {
+        /// Output to act on; defaults to the only non-focused output.
+        #[cfg_attr(feature = "clap", arg(long))]
+        output: Option<String>,
+    },
+    /// Switch a non-focused output to the workspace above, without focus.
+    ShowWorkspaceUp {
+        /// Output to act on; defaults to the only non-focused output.
+        #[cfg_attr(feature = "clap", arg(long))]
+        output: Option<String>,
+    },
+    /// Switch a non-focused output to the workspace below, without focus.
+    ShowWorkspaceDown {
+        /// Output to act on; defaults to the only non-focused output.
+        #[cfg_attr(feature = "clap", arg(long))]
+        output: Option<String>,
+    },
     /// Focus a window in the focused column by index.
     FocusWindowInColumn {
         /// Index of the window in the column.

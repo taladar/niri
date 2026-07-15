@@ -57,6 +57,7 @@ use crate::utils::{center, get_monotonic_time, CastSessionId, ResizeEdge};
 
 pub mod backend_ext;
 pub mod inject;
+pub mod reveal;
 pub mod move_grab;
 pub mod pick_color_grab;
 pub mod pick_window_grab;
@@ -853,6 +854,24 @@ impl State {
             }
             Action::SendIntoWindow(id, segments) => {
                 self.send_into_window(id, &segments);
+            }
+            Action::ShowWindow(id) => {
+                self.show_window(id);
+            }
+            Action::ShowWorkspace(reference) => {
+                self.show_workspace(reference);
+            }
+            Action::ShowColumnLeft(output) => {
+                self.show_column_left(output);
+            }
+            Action::ShowColumnRight(output) => {
+                self.show_column_right(output);
+            }
+            Action::ShowWorkspaceUp(output) => {
+                self.show_workspace_up(output);
+            }
+            Action::ShowWorkspaceDown(output) => {
+                self.show_workspace_down(output);
             }
             Action::FocusWindowInColumn(index) => {
                 self.niri.layout.focus_window_in_column(index);

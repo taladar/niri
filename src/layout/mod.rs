@@ -1547,6 +1547,43 @@ impl<W: LayoutElement> Layout<W> {
         }
     }
 
+    /// Like [`Self::activate_window`], but does not change the active monitor,
+    /// so the keyboard focus is left untouched. Makes the window's workspace the
+    /// active one on its monitor and scrolls the window into view. Intended for
+    /// showing a window on a *non-focused* output; the caller is responsible for
+    /// not calling this for a window on the focused output.
+    pub fn show_window(&mut self, window: &W::Id) {
+        if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
+            if move_.tile.window().id() == window {
+                return;
+            }
+        }
+
+        let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set else {
+            return;
+        };
+
+        for mon in monitors.iter_mut() {
+            for (workspace_idx, ws) in mon.workspaces.iter_mut().enumerate() {
+                if ws.activate_window(window) {
+                    // Deliberately do NOT set `active_monitor_idx` here: that is the step that
+                    // would move keyboard focus to this window's monitor.
+
+                    // If currently in the middle of a vertical swipe between the target workspace
+                    // and some other, don't switch the workspace.
+                    match &mon.workspace_switch {
+                        Some(WorkspaceSwitch::Gesture(gesture))
+                            if gesture.current_idx.floor() == workspace_idx as f64
+                                || gesture.current_idx.ceil() == workspace_idx as f64 => {}
+                        _ => mon.switch_workspace(workspace_idx),
+                    }
+
+                    return;
+                }
+            }
+        }
+    }
+
     pub fn activate_window_without_raising(&mut self, window: &W::Id) {
         if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
             if move_.tile.window().id() == window {

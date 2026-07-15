@@ -158,6 +158,13 @@ pub enum Action {
     FocusWindow(u64),
     #[knuffel(skip)]
     SendIntoWindow(u64, Vec<String>),
+    #[knuffel(skip)]
+    ShowWindow(u64),
+    ShowWorkspace(#[knuffel(argument)] WorkspaceReference),
+    ShowColumnLeft(#[knuffel(property(name = "output"))] Option<String>),
+    ShowColumnRight(#[knuffel(property(name = "output"))] Option<String>),
+    ShowWorkspaceUp(#[knuffel(property(name = "output"))] Option<String>),
+    ShowWorkspaceDown(#[knuffel(property(name = "output"))] Option<String>),
     FocusWindowInColumn(#[knuffel(argument)] u8),
     FocusWindowPrevious,
     FocusColumnLeft,
@@ -443,6 +450,14 @@ impl From<niri_ipc::Action> for Action {
             }
             niri_ipc::Action::FocusWindow { id } => Self::FocusWindow(id),
             niri_ipc::Action::SendIntoWindow { id, segments } => Self::SendIntoWindow(id, segments),
+            niri_ipc::Action::ShowWindow { id } => Self::ShowWindow(id),
+            niri_ipc::Action::ShowWorkspace { reference } => {
+                Self::ShowWorkspace(WorkspaceReference::from(reference))
+            }
+            niri_ipc::Action::ShowColumnLeft { output } => Self::ShowColumnLeft(output),
+            niri_ipc::Action::ShowColumnRight { output } => Self::ShowColumnRight(output),
+            niri_ipc::Action::ShowWorkspaceUp { output } => Self::ShowWorkspaceUp(output),
+            niri_ipc::Action::ShowWorkspaceDown { output } => Self::ShowWorkspaceDown(output),
             niri_ipc::Action::FocusWindowInColumn { index } => Self::FocusWindowInColumn(index),
             niri_ipc::Action::FocusWindowPrevious {} => Self::FocusWindowPrevious,
             niri_ipc::Action::FocusColumnLeft {} => Self::FocusColumnLeft,
